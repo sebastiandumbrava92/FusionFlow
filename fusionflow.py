@@ -1,4 +1,4 @@
-# filename: fusionflow_prototype.py
+# filename: fusionflow.py
 # Description: A conceptual prototype for a deep learning library 'FusionFlow',
 #              blending ideas from PyTorch, JAX, and TensorFlow/Keras.
 #              NOTE: This is a *highly simplified simulation* for API design
