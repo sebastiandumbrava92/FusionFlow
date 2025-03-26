@@ -1,0 +1,213 @@
+RFC: FF001
+Title: FusionFlow: A Basic Tensor and Autograd Library with C Backend
+Authors: Sebastian Dumbrava
+Date: March 26, 2025
+Status: Experimental / Informational
+--------------------------------------------------
+
+Abstract
+
+FusionFlow is a foundational library providing n-dimensional tensor operations and automatic differentiation (autograd) capabilities, primarily for educational and research purposes. It features a distinct separation between a user-facing Python frontend API and a performance-oriented C backend responsible for numerical computation and memory management. Interaction is facilitated via Python's ctypes library. This document specifies the architecture, components, API, and current implementation details of FusionFlow Version [e.g., 0.1 - Placeholder].
+
+1. Introduction
+
+1.1. Motivation
+
+The primary motivations for developing FusionFlow include:
+- Providing a transparent and relatively simple implementation of a deep learning-style tensor library with autograd, contrasting with the complexity of mature frameworks.
+- Serving as an educational tool for understanding the interplay between high-level Python APIs and low-level C/C++ backends in numerical computing.
+- Demonstrating the use of Python's ctypes library for interfacing with custom C code.
+- Establishing a base for exploring potential performance gains by offloading computations to compiled C code.
+- Creating a testbed for experimenting with custom operators, backends (e.g., GPU), or autograd mechanisms.
+
+1.2. Goals
+
+The main goals of the current version of FusionFlow are:
+- Implement a basic n-dimensional Tensor object.
+- Provide fundamental mathematical operations (arithmetic, matrix multiplication, activations).
+- Implement a functional reverse-mode automatic differentiation (autograd) system.
+- Offer rudimentary neural network building blocks (Module, Parameter, Linear, MSELoss).
+- Include a basic Stochastic Gradient Descent (SGD) optimizer.
+- Maintain a clear separation between the Python frontend and C backend.
+- Ensure functional correctness for implemented features on the CPU.
+
+1.3. Terminology
+
+- Tensor: An n-dimensional array; the primary data structure.
+- Backend: The compiled C shared library (libfusionflow_backend.so) containing data structures and function implementations for tensor operations.
+- Frontend: The Python module (fusionflow_core.py) providing the user API, interacting with the backend via ctypes.
+- Autograd: The automatic differentiation system that tracks operations and computes gradients via the backward pass.
+- Computation Graph: A directed acyclic graph (DAG) where nodes represent Tensors and edges represent operations, implicitly built during the forward pass.
+- FFTensor: The C struct representing a tensor within the backend.
+- Tensor (Python): The Python class wrapping a pointer to an FFTensor struct.
+- Parameter: A subclass of Tensor typically used for trainable model weights, requiring gradients by default.
+- Module: A base class for encapsulating model components and their parameters.
+- Op: An operation performed on Tensors (e.g., add, mul, matmul).
+- ctypes: A Python foreign function library used to call functions in the C backend.
+- Reference Counting: The manual memory management technique used in the C backend.
+
+2. Architecture Overview
+
+FusionFlow employs a two-part architecture:
+
+2.1. C Backend (libfusionflow_backend.so):
+- Written in C (currently C11).
+- Defines the low-level FFTensor data structure.
+- Implements core numerical kernels for tensor creation, manipulation, arithmetic, activations, gradient computation, and optimization steps.
+- Manages memory for FFTensor data buffers, shapes, and strides using manual reference counting.
+- Exposes a C API consisting of functions callable via ctypes.
+- Currently targets CPU execution only.
+
+2.2. Python Frontend (fusionflow_core.py):
+- Written in Python 3.
+- Loads the C backend shared library using ctypes.CDLL.
+- Defines Python representations of C enums (FFDataType, FFDevice) and structs (FFTensorStruct).
+- Specifies C function signatures (argtypes, restype) for type-safe ctypes calls.
+- Provides the high-level Tensor class, which wraps pointers to C FFTensor objects.
+- Implements operator overloading (__add__, __mul__, etc.) on the Tensor class to facilitate intuitive usage and automatic computation graph construction.
+- Manages the computation graph implicitly through _prev links on Tensor objects created by operations.
+- Implements the backward() method, which performs a topological sort and orchestrates calls to C backward kernels via stored function pointers (_backward_fn).
+- Provides basic NN components (Module, Parameter, Linear, MSELoss) and an optimizer (SGD).
+- Manages the lifecycle of C FFTensor objects by linking Python object garbage collection (__del__) to the C backend's reference counting (ff_tensor_release).
+
+3. C Backend Specification (libfusionflow_backend.so)
+
+3.1. Data Structures
+
+- FFDataType (enum): Defines numerical types supported by the backend.
+  - FF_FLOAT32, FF_FLOAT64, FF_INT32, FF_INT64, FF_BOOL
+- FFDevice (enum): Defines compute devices.
+  - FF_CPU, FF_GPU_CUDA (Placeholder), FF_GPU_ROCM (Placeholder)
+- FFTensor (struct): The core C tensor representation.
+  - void* data: Pointer to the raw data buffer on the specified device. Allocated/managed by the backend.
+  - size_t* shape: Pointer to an array holding the size of each dimension.
+  - size_t* strides: Pointer to an array holding the number of bytes to step in memory to advance one element along each dimension. Crucial for non-contiguous views (currently calculated but not fully utilized in all kernels).
+  - size_t ndim: Number of dimensions.
+  - FFDataType dtype: Data type enum.
+  - FFDevice device: Device enum where data resides.
+  - size_t size: Total number of elements in the tensor.
+  - size_t nbytes: Total size of the data buffer in bytes.
+  - int ref_count: Reference count for manual memory management.
+  - bool requires_grad: Flag indicating if gradient should be computed for this tensor.
+  - struct FFTensor* grad: Pointer to another FFTensor holding the accumulated gradient. NULL if requires_grad is false or gradient is not yet computed/allocated. Managed via reference counting.
+
+3.2. Memory Management
+
+- Memory for FFTensor structs and their associated data, shape, and strides arrays is managed manually via reference counting.
+- ff_tensor_create(...), ff_tensor_copy(...), etc.: Functions creating new FFTensor instances return a pointer with ref_count = 1.
+- ff_tensor_retain(FFTensor* tensor): Increments the ref_count of the given tensor. MUST be called by the frontend when creating an additional Python reference (e.g., via tensor.grad) to a C tensor pointer that needs to persist.
+- ff_tensor_release(FFTensor* tensor): Decrements the ref_count. If the count reaches zero, it recursively calls release on the grad tensor (if any), frees data, shape, strides, and finally the FFTensor struct itself. MUST be called by the frontend (Tensor.__del__) when a Python wrapper object is garbage collected.
+
+3.3. API Functions
+
+The C API exposes functions grouped by purpose:
+
+- Utility: ff_dtype_size, ff_calculate_size, ff_calculate_contiguous_strides.
+- Tensor Lifecycle & State: ff_tensor_create, ff_tensor_create_from_data, ff_tensor_copy_from_host, ff_tensor_fill, ff_tensor_retain, ff_tensor_release, ff_tensor_ensure_zero_grad, ff_tensor_zero_data, ff_tensor_copy, ff_tensor_ones, ff_tensor_eye, ff_tensor_uniform, ff_tensor_astype, ff_tensor_transpose.
+- Forward Operations: ff_tensor_add, ff_tensor_sub, ff_tensor_mul, ff_tensor_matmul, ff_tensor_pow_scalar, ff_tensor_mean, various scalar operations (_scalar), activations (tanh, exp, sigmoid, relu, abs), clip, comparisons (gt_scalar, lt_scalar), outer, sign. These functions typically create and return a new FFTensor result.
+- Autograd Backward Kernels: ff_tensor_add_backward, ff_tensor_sub_backward, ff_tensor_mul_backward, ff_tensor_matmul_backward, etc. These functions take the gradient of the operation's output (grad_output) and pointers to the inputs (and sometimes the forward output) involved in the original forward operation. They compute the gradient contribution with respect to the inputs and accumulate it into the grad field of the respective input FFTensors (using ff_tensor_ensure_zero_grad and internal accumulation helpers). They typically return an integer status code (0 for success).
+- Optimizer Kernels: ff_optim_sgd_step. Functions that perform in-place updates on parameter tensors based on their gradients and optimizer state/hyperparameters.
+
+3.4. Implementation Notes (Current Version)
+
+- CPU Only: All kernels are implemented for CPU execution using standard C loops.
+- Contiguous Assumption: While strides are calculated, most computational kernels currently assume contiguous memory layout for simplicity and performance (e.g., naive loops, matmul). Full stride support is incomplete.
+- Broadcasting: Only very basic broadcasting (e.g., matrix + vector add) is implemented in ff_tensor_add. NumPy-style broadcasting is not generally supported.
+- Algorithms: Uses naive C loops for most operations, including matrix multiplication (O(N^3)). No optimized BLAS/LAPACK routines are used.
+- Error Handling: Basic checks for NULL pointers, type/shape mismatches are present, usually returning NULL or non-zero status codes. Error reporting relies on fprintf(stderr, ...). More robust error handling mechanisms are not implemented.
+
+4. Python Frontend Specification (fusionflow_core.py)
+
+4.1. C Library Interaction
+
+- The C library (libfusionflow_backend.so) is loaded using ctypes.CDLL. Path searching and basic load error handling are included.
+- ctypes.Structure is used to define FFTensorStruct, mirroring the C struct layout. ctypes.POINTER(FFTensorStruct) (FFTensor_p) is used for tensor pointers.
+- argtypes (list of C types for arguments) and restype (C return type) are explicitly set for every C function accessed via ctypes, ensuring type safety and correct data marshalling.
+
+4.2. Tensor Class
+
+- Acts as the primary user interface. Each Tensor instance holds a self._ptr of type FFTensor_p.
+- Lifecycle: __init__ takes the FFTensor_p (assumed to have ref_count=1 from C). __del__ calls ff_tensor_release(self._ptr) to decrement the C reference count when the Python object is garbage collected.
+- Factory Methods: zeros, ones, eye, uniform, from_numpy provide convenient ways to create tensors, calling the respective C ff_tensor_create... or ff_tensor_... functions and wrapping the returned FFTensor_p. from_numpy handles data conversion and calls ff_tensor_create_from_data.
+- Properties: .shape, .ndim, .dtype, .device, .size provide read-only access to the C tensor's metadata via the _c_tensor property (which accesses self._ptr.contents). .requires_grad is a property allowing getting/setting the flag in the C struct. The .grad property getter retrieves the C grad pointer, calls ff_tensor_retain on it, and wraps it in a new Python Tensor; the setter assigns a Tensor or None, managing C retain/release calls appropriately.
+- Operator Overloading: Methods like __add__, __mul__, __matmul__, __pow__, etc., are implemented.
+  - They typically call internal wrappers (_op_wrapper, _unary_op_wrapper, _scalar_arg_op_wrapper).
+  - These wrappers select and call the appropriate C forward function (e.g., ff_tensor_add or ff_tensor_add_scalar).
+  - If any input requires gradients, the wrapper:
+    - Creates the output Tensor instance.
+    - Stores pointers to the input Tensor objects in the output's _prev set.
+    - Stores necessary context (C pointers to inputs/outputs, scalar values) in the output's _ctx dictionary.
+    - Assigns a closure to the output's _backward_fn. This closure captures the context (_ctx), the appropriate C backward function pointer (e.g., ff_tensor_add_backward), and the necessary logic to construct arguments and call the C function when invoked.
+- backward() Method:
+  - Performs reverse-mode automatic differentiation starting from the tensor it's called on (typically a scalar loss).
+  - Constructs a reverse topological sort of the computation graph by traversing _prev links.
+  - Initializes the gradient of the starting tensor to 1.0 using ff_tensor_ensure_zero_grad and ff_tensor_fill.
+  - Iterates through the sorted graph in reverse, calling the _backward_fn associated with each intermediate tensor.
+  - Each _backward_fn call triggers the execution of the corresponding C backward kernel, which accumulates gradients into the .grad tensors of its inputs.
+- Data Access: numpy() copies data from a CPU C tensor buffer to a new NumPy array. item() extracts the single value from a CPU scalar tensor.
+
+4.3. Autograd Mechanism
+
+- FusionFlow implements a basic tape-based autograd system.
+- The "tape" or computation graph is implicitly stored via the _prev attribute (a set of parent Tensor objects) on each Tensor created by a differentiable operation.
+- Operations supporting autograd define a _backward_fn closure during the forward pass. This closure encapsulates the logic needed to compute the gradient contributions for the operation's inputs given the gradient of its output.
+- The backward() call triggers the execution of these closures in the correct (reverse topological) order.
+- Gradient accumulation (handling cases where a tensor is used multiple times) is performed within the C backward kernels (via accumulate_grad helper).
+
+4.4. NN Components
+
+- Parameter: A Tensor subclass automatically setting requires_grad=True, used for trainable weights. Includes convenience constructors.
+- Module: A base class inspired by PyTorch's nn.Module. Manages Parameters and sub-Modules assigned as attributes. Provides parameters() iterator and zero_grad() method. Uses __call__ to invoke forward.
+- Linear: A Module implementing a dense linear layer (y = x @ W + b), using Parameter for weight and bias, and Tensor operations (@, +) in its forward method.
+- MSELoss: A Module calculating Mean Squared Error loss using Tensor operations (-, **, .mean()).
+- SGD: An optimizer class holding parameters and a learning rate. Its step() method calls the C ff_optim_sgd_step kernel for each parameter with a gradient.
+
+5. Usage Example
+
+Basic usage involves:
+1. Creating Tensor objects (e.g., from_numpy, zeros, uniform).
+2. Performing operations using standard Python operators (+, *, @, **) or tensor methods (.mean(), .tanh(), etc.).
+3. For neural networks, defining Module subclasses, initializing layers (Linear) and Parameters.
+4. Writing a training loop: forward pass through the model, loss calculation, optimizer.zero_grad(), loss.backward(), optimizer.step().
+Refer to fusionflow_test.py or the if __name__ == "__main__": block in fusionflow_core.py for concrete examples.
+
+6. Limitations and Future Work
+
+6.1. Current Limitations:
+
+- CPU execution only.
+- Limited operator coverage (no convolutions, pooling, advanced activations, comprehensive loss functions).
+- Incomplete stride support in C kernels (most assume contiguous memory).
+- Very basic broadcasting support.
+- Naive C implementations (e.g., matmul loop) lacking performance optimization.
+- Basic error handling and reporting.
+- No support for higher-order gradients.
+- No model/tensor serialization.
+- Limited device management capabilities.
+
+6.2. Future Work:
+
+- Implement GPU backend (CUDA/ROCm).
+- Expand operator library (Conv, Pool, Norm layers, more losses/activations).
+- Implement full stride support in all C kernels.
+- Implement NumPy-compatible broadcasting.
+- Optimize C kernels (SIMD, multi-threading, use BLAS libraries).
+- Implement more optimizers (Adam, RMSprop, etc.).
+- Add gradient checking utility.
+- Implement serialization (save/load).
+- Enhance device placement/transfer API (.to(device)).
+- Improve build system (CMake/Meson).
+- Add support for views and more advanced indexing.
+
+7. Security Considerations
+
+- Loading the shared library libfusionflow_backend.so using ctypes executes native code. Users must ensure the library originates from a trusted source to avoid security risks.
+- Incorrect ctypes definitions (function signatures, struct layouts) could potentially lead to memory corruption or crashes.
+- The C backend performs basic input validation (NULL checks, type/shape checks), but more extensive validation could enhance robustness against malformed inputs potentially passed via ctypes. No specific security vulnerabilities have been identified in the current simple implementation, but the nature of C interop requires caution.
+
+8. References
+
+- NumPy API: https://numpy.org/doc/stable/reference/
+- PyTorch API: https://pytorch.org/docs/stable/index.html
+- TensorFlow API: https://www.tensorflow.org/api_docs/python/tf
+- Python ctypes Documentation: https://docs.python.org/3/library/ctypes.html
