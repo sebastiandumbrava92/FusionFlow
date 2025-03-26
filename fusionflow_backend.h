@@ -2,11 +2,13 @@
 #ifndef FUSIONFLOW_BACKEND_H
 #define FUSIONFLOW_BACKEND_H
 
-#include <stddef.h> // For size_t
-#include <stdbool.h> // For bool type (C99 onwards)
-#include <stdint.h> // For fixed-width integer types
+// --- 1. Standard Includes ---
+// MUST come first to define basic types used below
+#include <stddef.h> // Defines size_t
+#include <stdbool.h> // Defines bool, true, false (C99+)
+#include <stdint.h> // Defines int32_t, int64_t, etc. (C99+)
 
-// --- Enums ---
+// --- 2. Enums ---
 
 // Supported Data Types
 typedef enum {
@@ -14,124 +16,105 @@ typedef enum {
     FF_FLOAT64,
     FF_INT32,
     FF_INT64,
-    FF_BOOL // Add more as needed (uint8, int8, etc.)
+    FF_BOOL
 } FFDataType;
 
-// Supported Devices (Expand later for GPU etc.)
+// Supported Devices
 typedef enum {
     FF_CPU,
     FF_GPU_CUDA, // Placeholder
     FF_GPU_ROCM  // Placeholder
 } FFDevice;
 
-// --- Tensor Structure ---
-
-// Forward declaration for gradient tensor pointer
+// --- 3. Struct Forward Declaration (Optional but good practice) ---
 struct FFTensor;
 
+// --- 4. Struct Definition ---
 typedef struct FFTensor {
-    void* data;         // Pointer to the raw data buffer
-    size_t* shape;      // Array of dimension sizes
-    size_t* strides;    // Array of strides in bytes for each dimension
-    size_t ndim;        // Number of dimensions
-    FFDataType dtype;   // Data type enum
-    FFDevice device;    // Device where the tensor resides
-
-    size_t size;        // Total number of elements
-    size_t nbytes;      // Total size of the data buffer in bytes
-
-    // Memory Management (Simple Reference Counting)
+    void* data;
+    size_t* shape;
+    size_t* strides;
+    size_t ndim;
+    FFDataType dtype;
+    FFDevice device;
+    size_t size;
+    size_t nbytes;
     int ref_count;
-
-    // Autograd related (Basic placeholders)
     bool requires_grad;
-    struct FFTensor* grad; // Pointer to the gradient tensor (same shape/dtype)
+    struct FFTensor* grad; // Uses forward-declared struct name okay here
+} FFTensor; // Typedef name defined *after* struct definition
 
-    // Internal flags/metadata (optional)
-    // e.g., bool is_contiguous;
-    //       void* allocation; // Pointer to original allocation if this is a view
+// --- 5. Function Prototypes (Now all types are known) ---
 
-} FFTensor;
-
-
-// --- Utility Functions ---
-
-// Get size of a data type in bytes
+// Utility Functions
 size_t ff_dtype_size(FFDataType dtype);
-
-// Calculate total number of elements from shape
 size_t ff_calculate_size(const size_t* shape, size_t ndim);
-
-// Calculate contiguous strides for a given shape and element size
 void ff_calculate_contiguous_strides(const size_t* shape, size_t ndim, size_t element_size, size_t* out_strides);
+int ff_tensor_fill_with_scalar_div(FFTensor* tensor, const FFTensor* scalar_tensor, size_t divisor);
 
-// --- Tensor Lifecycle Functions ---
-
-/**
- * @brief Creates a new FFTensor with allocated data buffer.
- * Initializes data to zeros by default.
- * Initializes strides for contiguous memory layout.
- * Initializes ref_count to 1.
- * Gradient tensor is NOT allocated by default.
- *
- * @param shape Array of dimension sizes.
- * @param ndim Number of dimensions.
- * @param dtype Data type.
- * @param device Device (currently only FF_CPU supported).
- * @param requires_grad Whether the tensor should track gradients.
- * @return Pointer to the newly created FFTensor, or NULL on failure.
- */
+// Tensor Lifecycle & State
 FFTensor* ff_tensor_create(const size_t* shape, size_t ndim, FFDataType dtype, FFDevice device, bool requires_grad);
-
-/**
- * @brief Creates a tensor that is a view of another tensor's data.
- * Shares data buffer but has own shape, strides, ndim.
- * Increments ref_count of the source tensor's data allocation mechanism (if applicable, complex).
- * For simplicity now, maybe just point to source data and manage ref_count externally?
- * --> Let's defer view creation for now, it adds complexity to memory management.
- */
-// FFTensor* ff_tensor_create_view(...);
-
-/**
- * @brief Increments the reference count of the tensor.
- * Needed when assigning tensor pointer to another variable or structure.
- *
- * @param tensor The tensor to retain.
- */
+FFTensor* ff_tensor_create_from_data(const void* host_data, const size_t* shape, size_t ndim, FFDataType dtype, FFDevice device, bool requires_grad);
+int ff_tensor_copy_from_host(FFTensor* tensor, const void* host_data);
+int ff_tensor_fill(FFTensor* tensor, double value);
 void ff_tensor_retain(FFTensor* tensor);
-
-/**
- * @brief Decrements the reference count of the tensor.
- * If the reference count reaches zero, frees the associated memory
- * (data buffer, shape, strides, gradient tensor, and the tensor struct itself).
- * Handles potential recursive destruction if gradient tensor also reaches ref_count zero.
- *
- * @param tensor The tensor to release.
- */
 void ff_tensor_release(FFTensor* tensor);
+int ff_tensor_ensure_zero_grad(FFTensor* tensor);
+int ff_tensor_zero_data(FFTensor* tensor);
+FFTensor* ff_tensor_copy(const FFTensor* source);
+FFTensor* ff_tensor_ones(const size_t* shape, size_t ndim, FFDataType dtype, FFDevice device, bool requires_grad);
+FFTensor* ff_tensor_eye(size_t dim, FFDataType dtype, FFDevice device, bool requires_grad);
+FFTensor* ff_tensor_uniform(double low, double high, const size_t* shape, size_t ndim, FFDataType dtype, FFDevice device, bool requires_grad);
+FFTensor* ff_tensor_astype(const FFTensor* source, FFDataType new_dtype);
+FFTensor* ff_tensor_transpose(const FFTensor* tensor); // Basic 2D
 
-
-// --- Basic Data Access (Example - needs bounds checking etc.) ---
-// void* ff_tensor_get_element_ptr(const FFTensor* tensor, const size_t* indices);
-
-
-// --- Basic Operations (Prototypes) ---
-
-/**
- * @brief Performs element-wise addition of two tensors (a + b).
- * Assumes a and b have the same shape and dtype for this basic version.
- * Creates and returns a new tensor for the result.
- * Does NOT handle autograd graph building - this function is just the compute kernel.
- *
- * @param a The first input tensor.
- * @param b The second input tensor.
- * @return A new FFTensor containing the result, or NULL on failure (e.g., shape mismatch).
- */
+// Forward Operations
 FFTensor* ff_tensor_add(const FFTensor* a, const FFTensor* b);
+FFTensor* ff_tensor_sub(const FFTensor* a, const FFTensor* b);
+FFTensor* ff_tensor_mul(const FFTensor* a, const FFTensor* b);
+FFTensor* ff_tensor_matmul(const FFTensor* a, const FFTensor* b);
+FFTensor* ff_tensor_pow_scalar(const FFTensor* tensor, double value);
+FFTensor* ff_tensor_mean(const FFTensor* tensor);
+FFTensor* ff_tensor_mul_scalar(const FFTensor* tensor, double value);
+FFTensor* ff_tensor_div_scalar(const FFTensor* tensor, double value);
+FFTensor* ff_tensor_rdiv_scalar(double value, const FFTensor* tensor);
+FFTensor* ff_tensor_add_scalar(const FFTensor* tensor, double value);
+FFTensor* ff_tensor_tanh(const FFTensor* tensor);
+FFTensor* ff_tensor_exp(const FFTensor* tensor);
+FFTensor* ff_tensor_sigmoid(const FFTensor* tensor);
+FFTensor* ff_tensor_relu(const FFTensor* tensor);
+FFTensor* ff_tensor_abs(const FFTensor* tensor);
+FFTensor* ff_tensor_clip(const FFTensor* tensor, double min_val, double max_val);
+FFTensor* ff_tensor_gt_scalar(const FFTensor* tensor, double value);
+FFTensor* ff_tensor_lt_scalar(const FFTensor* tensor, double value);
+FFTensor* ff_tensor_outer(const FFTensor* vec_a, const FFTensor* vec_b);
+FFTensor* ff_tensor_sign(const FFTensor* tensor);
 
-// Add prototypes for other operations like subtract, multiply, matmul etc.
-// FFTensor* ff_tensor_mul(const FFTensor* a, const FFTensor* b);
-// FFTensor* ff_tensor_matmul(const FFTensor* a, const FFTensor* b); // More complex
+// Autograd Backward Kernels
+int ff_tensor_add_backward(FFTensor* grad_output, FFTensor* input_a, FFTensor* input_b);
+int ff_tensor_sub_backward(FFTensor* grad_output, FFTensor* input_a, FFTensor* input_b);
+int ff_tensor_mul_backward(FFTensor* grad_output, FFTensor* input_a, FFTensor* input_b);
+int ff_tensor_matmul_backward(FFTensor* grad_output, FFTensor* input_a, FFTensor* input_b);
+int ff_tensor_pow_scalar_backward(FFTensor* grad_output, FFTensor* input_a, double exponent);
+int ff_tensor_mean_backward(FFTensor* grad_output, FFTensor* input_a);
+int ff_tensor_transpose_backward(FFTensor* grad_output, FFTensor* input_a);
+int ff_tensor_mul_scalar_backward(FFTensor* grad_output, FFTensor* input_a, double scalar_value);
+int ff_tensor_div_scalar_backward(FFTensor* grad_output, FFTensor* input_a, double scalar_value);
+int ff_tensor_rdiv_scalar_backward(FFTensor* grad_output, FFTensor* input_a, double scalar_value, FFTensor* forward_output);
+int ff_tensor_add_scalar_backward(FFTensor* grad_output, FFTensor* input_a);
+int ff_tensor_tanh_backward(FFTensor* grad_output, FFTensor* input_a, FFTensor* forward_output);
+int ff_tensor_exp_backward(FFTensor* grad_output, FFTensor* input_a, FFTensor* forward_output);
+int ff_tensor_sigmoid_backward(FFTensor* grad_output, FFTensor* input_a, FFTensor* forward_output);
+int ff_tensor_relu_backward(FFTensor* grad_output, FFTensor* input_a);
+int ff_tensor_abs_backward(FFTensor* grad_output, FFTensor* input_a);
+int ff_tensor_clip_backward(FFTensor* grad_output, FFTensor* input_a, double min_val, double max_val);
+int ff_tensor_outer_backward(FFTensor* grad_output, FFTensor* input_a, FFTensor* input_b);
+// Add prototype for astype backward if/when implemented
+// int ff_tensor_astype_backward(FFTensor* grad_output, FFTensor* input_a);
+
+
+// Optimizer Kernels
+int ff_optim_sgd_step(FFTensor* param, const FFTensor* grad, double lr);
 
 
 #endif // FUSIONFLOW_BACKEND_H
